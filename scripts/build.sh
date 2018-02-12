@@ -40,9 +40,9 @@ if [ ! -z $COVERALLS_TOKEN ] && [ -f ./coverage.out ]; then
 fi
 
 go build -o "build/${OUT}" &&
-sha1sum -a 1 -p "build/${OUT}" | cut -d ' ' -f 1 > "build/${OUT}.sha1" &&
-echo "testing the bin"
-"./build/${OUT}" version
+# sha1sum -a 1 -p "build/${OUT}" | cut -d ' ' -f 1 > "build/${OUT}.sha1" &&
+# echo "testing the bin"
+# "./build/${OUT}" version
 
 cat >build/bintray.json << EOL
 {
