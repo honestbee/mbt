@@ -35,12 +35,12 @@ make restore &&
 go test ./e -v -covermode=count &&
 go test ./trie -v -covermode=count &&
 go test ./lib -v -covermode=count -coverprofile=coverage.out &&
-if [ ! -z $COVERALLS_TOKEN ] && [ -f ./coverage.out ]; then 
+if [ ! -z $COVERALLS_TOKEN ] && [ -f ./coverage.out ]; then
   $HOME/gopath/bin/goveralls -coverprofile=coverage.out -service=travis-ci -repotoken $COVERALLS_TOKEN
 fi
 
 go build -o "build/${OUT}" &&
-shasum -a 1 -p "build/${OUT}" | cut -d ' ' -f 1 > "build/${OUT}.sha1" &&
+sha1sum -a 1 -p "build/${OUT}" | cut -d ' ' -f 1 > "build/${OUT}.sha1" &&
 echo "testing the bin"
 "./build/${OUT}" version
 
