@@ -1,142 +1,173 @@
+/*
+Copyright 2018 MBT Authors.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+		http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package lib
 
 import (
-	"fmt"
-	"io"
-	"os"
-	"os/exec"
-	"path"
 	"runtime"
-	"strings"
 
 	git "github.com/libgit2/git2go"
 	"github.com/mbtproject/mbt/e"
-	"gopkg.in/sirupsen/logrus.v1"
 )
-
-// BuildStage is an enum to indicate various stages of the build.
-type BuildStage = int
 
 var defaultCheckoutOptions = &git.CheckoutOpts{
 	Strategy: git.CheckoutSafe,
 }
 
-const (
-	BuildStageBeforeBuild = iota
-	BuildStageAfterBuild
-	BuildStageSkipBuild
-)
-
-// Build runs the build for the modules in specified manifest.
-func Build(m *Manifest, stdin io.Reader, stdout, stderr io.Writer, buildStageCallback func(mod *Module, s BuildStage)) error {
-	repo, err := git.OpenRepository(m.Dir)
+func (s *stdSystem) BuildBranch(name string, filterOptions *FilterOptions, options *CmdOptions) (*BuildSummary, error) {
+	m, err := s.ManifestByBranch(name)
 	if err != nil {
-		return e.Wrapf(ErrClassUser, err, "Unable to open repository in %s", m.Dir)
+		return nil, err
 	}
 
-	dirty, err := isWorkingDirDirty(repo)
+	m, err = m.ApplyFilters(filterOptions)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	if dirty {
-		return e.NewError(ErrClassUser, "dirty working dir")
-	}
+	return s.checkoutAndBuildManifest(m, options)
+}
 
-	commit, err := getCommit(repo, m.Sha)
+func (s *stdSystem) BuildPr(src, dst string, options *CmdOptions) (*BuildSummary, error) {
+	m, err := s.ManifestByPr(src, dst)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	tree, err := commit.Tree()
+	return s.checkoutAndBuildManifest(m, options)
+}
+
+func (s *stdSystem) BuildDiff(from, to string, options *CmdOptions) (*BuildSummary, error) {
+	m, err := s.ManifestByDiff(from, to)
 	if err != nil {
-		return e.Wrap(ErrClassInternal, err)
+		return nil, err
 	}
 
-	// TODO: Confirm the strategy is correct
-	err = repo.CheckoutTree(tree, defaultCheckoutOptions)
+	return s.checkoutAndBuildManifest(m, options)
+}
+
+func (s *stdSystem) BuildCurrentBranch(filterOptions *FilterOptions, options *CmdOptions) (*BuildSummary, error) {
+	m, err := s.ManifestByCurrentBranch()
 	if err != nil {
-		return e.Wrap(ErrClassInternal, err)
+		return nil, err
 	}
 
-	defer checkoutHead(repo)
+	m, err = m.ApplyFilters(filterOptions)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.checkoutAndBuildManifest(m, options)
+}
+
+func (s *stdSystem) BuildCommit(commit string, filterOptions *FilterOptions, options *CmdOptions) (*BuildSummary, error) {
+	m, err := s.ManifestByCommit(commit)
+	if err != nil {
+		return nil, err
+	}
+
+	m, err = m.ApplyFilters(filterOptions)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.checkoutAndBuildManifest(m, options)
+}
+
+func (s *stdSystem) BuildCommitContent(commit string, options *CmdOptions) (*BuildSummary, error) {
+	m, err := s.ManifestByCommitContent(commit)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.checkoutAndBuildManifest(m, options)
+}
+
+func (s *stdSystem) BuildWorkspace(filterOptions *FilterOptions, options *CmdOptions) (*BuildSummary, error) {
+	m, err := s.ManifestByWorkspace()
+	if err != nil {
+		return nil, err
+	}
+
+	m, err = m.ApplyFilters(filterOptions)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.buildManifest(m, options)
+}
+
+func (s *stdSystem) BuildWorkspaceChanges(options *CmdOptions) (*BuildSummary, error) {
+	m, err := s.ManifestByWorkspaceChanges()
+	if err != nil {
+		return nil, err
+	}
+
+	return s.buildManifest(m, options)
+}
+
+func (s *stdSystem) checkoutAndBuildManifest(m *Manifest, options *CmdOptions) (*BuildSummary, error) {
+	r, err := s.WorkspaceManager.CheckoutAndRun(m.Sha, func() (interface{}, error) {
+		return s.buildManifest(m, options)
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return r.(*BuildSummary), nil
+}
+
+func (s *stdSystem) buildManifest(m *Manifest, options *CmdOptions) (*BuildSummary, error) {
+	completed := make([]*BuildResult, 0)
+	skipped := make([]*Module, 0)
 
 	for _, a := range m.Modules {
-		if !canBuildHere(a) {
-			buildStageCallback(a, BuildStageSkipBuild)
+		cmd, ok := s.canBuildHere(a)
+		if !ok {
+			skipped = append(skipped, a)
+			options.Callback(a, CmdStageSkipBuild, nil)
 			continue
 		}
 
-		buildStageCallback(a, BuildStageBeforeBuild)
-		err := buildOne(m, a, stdin, stdout, stderr)
+		options.Callback(a, CmdStageBeforeBuild, nil)
+		err := s.execBuild(cmd, m, a, options)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		buildStageCallback(a, BuildStageAfterBuild)
+		options.Callback(a, CmdStageAfterBuild, nil)
+		completed = append(completed, &BuildResult{Module: a})
 	}
 
-	return nil
+	return &BuildSummary{Manifest: m, Completed: completed, Skipped: skipped}, nil
 }
 
-// BuildDir runs the build for the modules in the specified directory.
-func BuildDir(m *Manifest, stdin io.Reader, stdout, stderr io.Writer, buildStageCallback func(mod *Module, s BuildStage)) error {
-	for _, a := range m.Modules {
-		if !canBuildHere(a) {
-			buildStageCallback(a, BuildStageSkipBuild)
-			continue
-		}
-
-		buildStageCallback(a, BuildStageBeforeBuild)
-		err := buildOne(m, a, stdin, stdout, stderr)
-		if err != nil {
-			return err
-		}
-		buildStageCallback(a, BuildStageAfterBuild)
-	}
-
-	return nil
-}
-
-func setupModBuildEnvironment(manifest *Manifest, mod *Module) []string {
-	r := []string{
-		fmt.Sprintf("MBT_BUILD_COMMIT=%s", manifest.Sha),
-		fmt.Sprintf("MBT_MODULE_VERSION=%s", mod.Version()),
-		fmt.Sprintf("MBT_MODULE_NAME=%s", mod.Name()),
-	}
-
-	for k, v := range mod.Properties() {
-		if value, ok := v.(string); ok {
-			r = append(r, fmt.Sprintf("MBT_MODULE_PROPERTY_%s=%s", strings.ToUpper(k), value))
-		}
-	}
-
-	return r
-}
-
-func buildOne(manifest *Manifest, mod *Module, stdin io.Reader, stdout, stderr io.Writer) error {
-	build := mod.Build()[runtime.GOOS]
-	cmd := exec.Command(build.Cmd)
-	cmd.Env = append(os.Environ(), setupModBuildEnvironment(manifest, mod)...)
-	cmd.Dir = path.Join(manifest.Dir, mod.Path())
-	cmd.Stdin = stdin
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	cmd.Args = append(cmd.Args, build.Args...)
-	err := cmd.Run()
+func (s *stdSystem) execBuild(buildCmd *Cmd, manifest *Manifest, module *Module, options *CmdOptions) error {
+	err := s.ProcessManager.Exec(manifest, module, options, buildCmd.Cmd, buildCmd.Args...)
 	if err != nil {
-		return e.Wrapf(ErrClassUser, err, msgFailedBuild, mod.Name())
+		return e.Wrapf(ErrClassUser, err, msgFailedBuild, module.Name())
 	}
 	return nil
 }
 
-func canBuildHere(mod *Module) bool {
-	_, ok := mod.Build()[runtime.GOOS]
-	return ok
-}
+func (s *stdSystem) canBuildHere(mod *Module) (*Cmd, bool) {
+	c, ok := mod.Build()[runtime.GOOS]
 
-func checkoutHead(repo *git.Repository) {
-	err := repo.CheckoutHead(&git.CheckoutOpts{Strategy: git.CheckoutForce})
-	if err != nil {
-		logrus.Warnf("failed to checkout head: %s", err)
+	if !ok {
+		c, ok = mod.Build()["default"]
 	}
+
+	return c, ok
 }

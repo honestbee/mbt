@@ -1,86 +1,116 @@
+/*
+Copyright 2018 MBT Authors.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+		http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package lib
 
 import (
+	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
-	"path"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"text/template"
 
-	git "github.com/libgit2/git2go"
 	"github.com/mbtproject/mbt/e"
 )
 
 // TemplateData is the data passed into template.
 type TemplateData struct {
-	Args    map[string]interface{}
-	Sha     string
-	Env     map[string]string
-	Modules map[string]*Module
+	Args        map[string]interface{}
+	Sha         string
+	Env         map[string]string
+	Modules     map[string]*Module
+	ModulesList []*Module
 }
 
-// ApplyBranch applies the repository manifest to specified template.
-func ApplyBranch(dir, templatePath, branch string, output io.Writer) error {
-	repo, err := openRepo(dir)
-	if err != nil {
-		return err
-	}
-
-	commit, err := getBranchCommit(repo, branch)
-	if err != nil {
-		return err
-	}
-
-	return applyCore(repo, commit, dir, templatePath, output)
+// KVP is a key value pair.
+type KVP struct {
+	Key   string
+	Value interface{}
 }
 
-// ApplyCommit applies the repository manifest to specified template.
-func ApplyCommit(dir, sha, templatePath string, output io.Writer) error {
-	repo, err := openRepo(dir)
+type kvpSoter []*KVP
+
+func (a kvpSoter) Len() int {
+	return len(a)
+}
+
+func (a kvpSoter) Swap(i, j int) {
+	a[i], a[j] = a[j], a[i]
+}
+
+func (a kvpSoter) Less(i, j int) bool {
+	return a[i].Key < a[j].Key
+}
+
+type modulesByNameSorter []*Module
+
+func (m modulesByNameSorter) Len() int {
+	return len(m)
+}
+
+func (m modulesByNameSorter) Swap(i, j int) {
+	m[i], m[j] = m[j], m[i]
+}
+
+func (m modulesByNameSorter) Less(i, j int) bool {
+	return m[i].Name() < m[j].Name()
+}
+
+func (s *stdSystem) ApplyBranch(templatePath, branch string, output io.Writer) error {
+	commit, err := s.Repo.BranchCommit(branch)
 	if err != nil {
 		return err
 	}
+	return s.applyCore(commit, templatePath, output)
+}
 
-	commit, err := getCommit(repo, sha)
+func (s *stdSystem) ApplyCommit(commit string, templatePath string, output io.Writer) error {
+	c, err := s.Repo.GetCommit(commit)
 	if err != nil {
 		return err
 	}
-
-	return applyCore(repo, commit, dir, templatePath, output)
+	return s.applyCore(c, templatePath, output)
 }
 
 // ApplyHead applies the repository manifest to specified template.
-func ApplyHead(dir, templatePath string, output io.Writer) error {
-	repo, err := openRepo(dir)
+func (s *stdSystem) ApplyHead(templatePath string, output io.Writer) error {
+	branch, err := s.Repo.CurrentBranch()
 	if err != nil {
 		return err
 	}
 
-	commit, err := getHeadCommit(repo)
-	if err != nil {
-		return err
-	}
-
-	return applyCore(repo, commit, dir, templatePath, output)
+	return s.ApplyBranch(templatePath, branch, output)
 }
 
-// ApplyLocal applies local directory manifest over an specified template
-func ApplyLocal(dir, templatePath string, output io.Writer) error {
-	absDir, err := filepath.Abs(dir)
+func (s *stdSystem) ApplyLocal(templatePath string, output io.Writer) error {
+	absDir, err := filepath.Abs(s.Repo.Path())
 	if err != nil {
 		return e.Wrapf(ErrClassUser, err, msgFailedLocalPath)
 	}
 
-	absTemplatePath := path.Join(absDir, templatePath)
+	absTemplatePath := filepath.Join(absDir, templatePath)
 	c, err := ioutil.ReadFile(absTemplatePath)
 	if err != nil {
 		return e.Wrapf(ErrClassUser, err, msgFailedReadFile, absTemplatePath)
 	}
 
-	m, err := ManifestByLocalDir(absDir, true)
+	m, err := s.ManifestBuilder().ByWorkspace()
 	if err != nil {
 		return err
 	}
@@ -88,32 +118,26 @@ func ApplyLocal(dir, templatePath string, output io.Writer) error {
 	return processTemplate(c, m, output)
 }
 
-func applyCore(repo *git.Repository, commit *git.Commit, dir, templatePath string, output io.Writer) error {
-	tree, err := commit.Tree()
+func (s *stdSystem) applyCore(commit Commit, templatePath string, output io.Writer) error {
+	b, err := s.Repo.BlobContentsFromTree(commit, templatePath)
 	if err != nil {
-		return e.Wrap(ErrClassInternal, err)
+		return e.Wrapf(ErrClassUser, err, msgTemplateNotFound, templatePath, commit)
 	}
 
-	entry, err := tree.EntryByPath(templatePath)
-	if err != nil {
-		return e.Wrapf(ErrClassUser, err, msgTemplateNotFound, templatePath, commit.Id().String())
-	}
-
-	b, err := repo.LookupBlob(entry.Id)
-	if err != nil {
-		return e.Wrap(ErrClassInternal, err)
-	}
-
-	m, err := fromCommit(repo, dir, commit)
+	m, err := s.MB.ByCommit(commit)
 	if err != nil {
 		return err
 	}
 
-	return processTemplate(b.Contents(), m, output)
+	return processTemplate(b, m, output)
 }
 
 func processTemplate(buffer []byte, m *Manifest, output io.Writer) error {
 	modulesIndex := m.Modules.indexByName()
+	sortedModules := make(modulesByNameSorter, len(m.Modules))
+	copy(sortedModules, m.Modules)
+	sort.Sort(sortedModules)
+
 	temp, err := template.New("template").Funcs(template.FuncMap{
 		"module": func(n string) *Module {
 			return modulesIndex[n]
@@ -132,16 +156,13 @@ func processTemplate(buffer []byte, m *Manifest, output io.Writer) error {
 
 			return resolveProperty(m.Properties(), strings.Split(n, "."), def)
 		},
-		"contains": func(container interface{}, item string) bool {
+		"contains": func(container interface{}, item interface{}) bool {
 			if container == nil {
 				return false
 			}
+
 			a, ok := container.([]interface{})
-			if ok {
-				if reflect.TypeOf(a).Elem().AssignableTo(reflect.TypeOf(item)) {
-					return false
-				}
-			} else {
+			if !ok {
 				return false
 			}
 
@@ -150,7 +171,116 @@ func processTemplate(buffer []byte, m *Manifest, output io.Writer) error {
 					return true
 				}
 			}
+
 			return false
+		},
+		"join": func(container interface{}, format string, sep string) string {
+			if container == nil {
+				return ""
+			}
+
+			a, ok := container.([]interface{})
+			if !ok {
+				return ""
+			}
+
+			strs := make([]string, 0, len(a))
+			for _, i := range a {
+				strs = append(strs, fmt.Sprintf(format, i))
+			}
+
+			return strings.Join(strs, sep)
+		},
+		"kvplist": func(m map[string]interface{}) []*KVP {
+			l := make([]*KVP, 0, len(m))
+			for k, v := range m {
+				l = append(l, &KVP{Key: k, Value: v})
+			}
+
+			sort.Sort(kvpSoter(l))
+			return l
+		},
+		"add": func(a, b int) int {
+			return a + b
+		},
+		"sub": func(a, b int) int {
+			return a - b
+		},
+		"mul": func(a, b int) int {
+			return a * b
+		},
+		"div": func(a, b int) int {
+			return a / b
+		},
+		"istail": func(array, value interface{}) bool {
+			if array == nil {
+				return false
+			}
+
+			t := reflect.TypeOf(array)
+			if t.Kind() != reflect.Array && t.Kind() != reflect.Slice {
+				panic(fmt.Sprintf("istail function requires an array/slice as input %d", t.Kind()))
+			}
+
+			arrayVal := reflect.ValueOf(array)
+			if arrayVal.Len() == 0 {
+				return false
+			}
+
+			v := arrayVal.Index(arrayVal.Len() - 1).Interface()
+			return v == value
+		},
+		"ishead": func(array, value interface{}) bool {
+			if array == nil {
+				return false
+			}
+
+			t := reflect.TypeOf(array)
+			if t.Kind() != reflect.Array && t.Kind() != reflect.Slice {
+				panic(fmt.Sprintf("ishead function requires an array/slice as input %d", t.Kind()))
+			}
+
+			arrayVal := reflect.ValueOf(array)
+			if arrayVal.Len() == 0 {
+				return false
+			}
+
+			v := arrayVal.Index(0).Interface()
+			return v == value
+		},
+		"head": func(array interface{}) interface{} {
+			if array == nil {
+				return ""
+			}
+
+			t := reflect.TypeOf(array)
+			if t.Kind() != reflect.Array && t.Kind() != reflect.Slice {
+				panic(fmt.Sprintf("head function requires an array/slice as input %d", t.Kind()))
+			}
+
+			arrayVal := reflect.ValueOf(array)
+			if arrayVal.Len() == 0 {
+				return ""
+			}
+
+			return arrayVal.Index(0).Interface()
+		},
+		"tail": func(array interface{}) interface{} {
+			if array == nil {
+				return ""
+			}
+
+			t := reflect.TypeOf(array)
+			if t.Kind() != reflect.Array && t.Kind() != reflect.Slice {
+				panic(fmt.Sprintf("tail function requires an array/slice as input %d", t.Kind()))
+			}
+
+			arrayVal := reflect.ValueOf(array)
+			if arrayVal.Len() == 0 {
+				return ""
+			}
+
+			return arrayVal.Index(arrayVal.Len() - 1).Interface()
 		},
 	}).Parse(string(buffer))
 	if err != nil {
@@ -158,9 +288,10 @@ func processTemplate(buffer []byte, m *Manifest, output io.Writer) error {
 	}
 
 	data := &TemplateData{
-		Sha:     m.Sha,
-		Env:     getEnvMap(),
-		Modules: m.Modules.indexByName(),
+		Sha:         m.Sha,
+		Env:         getEnvMap(),
+		Modules:     m.Modules.indexByName(),
+		ModulesList: sortedModules,
 	}
 
 	return temp.Execute(output, data)

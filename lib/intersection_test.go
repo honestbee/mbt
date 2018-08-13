@@ -1,3 +1,18 @@
+/*
+Copyright 2018 MBT Authors.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+		http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package lib
 
 import (
@@ -8,8 +23,7 @@ import (
 
 func TestIntersectionWithElements(t *testing.T) {
 	clean()
-	repo, err := createTestRepository(".tmp/repo")
-	check(t, err)
+	repo := NewTestRepo(t, ".tmp/repo")
 
 	check(t, repo.InitModule("app-a"))
 	check(t, repo.InitModule("app-b"))
@@ -29,14 +43,14 @@ func TestIntersectionWithElements(t *testing.T) {
 
 	third := repo.LastCommit
 
-	mods, err := IntersectionByCommit(".tmp/repo", second.String(), third.String())
+	mods, err := NewWorld(t, ".tmp/repo").System.IntersectionByCommit(second.String(), third.String())
 	check(t, err)
 
 	assert.Len(t, mods, 1)
 	assert.Equal(t, "app-a", mods[0].Name())
 
 	// This operation should be commutative
-	mods, err = IntersectionByCommit(".tmp/repo", third.String(), second.String())
+	mods, err = NewWorld(t, ".tmp/repo").System.IntersectionByCommit(third.String(), second.String())
 	check(t, err)
 
 	assert.Len(t, mods, 1)
@@ -45,8 +59,7 @@ func TestIntersectionWithElements(t *testing.T) {
 
 func TestIntersectionWithoutElements(t *testing.T) {
 	clean()
-	repo, err := createTestRepository(".tmp/repo")
-	check(t, err)
+	repo := NewTestRepo(t, ".tmp/repo")
 
 	check(t, repo.InitModule("app-a"))
 	check(t, repo.InitModule("app-b"))
@@ -65,13 +78,13 @@ func TestIntersectionWithoutElements(t *testing.T) {
 
 	third := repo.LastCommit
 
-	mods, err := IntersectionByCommit(".tmp/repo", second.String(), third.String())
+	mods, err := NewWorld(t, ".tmp/repo").System.IntersectionByCommit(second.String(), third.String())
 	check(t, err)
 
 	assert.Len(t, mods, 0)
 
 	// This operation should be commutative
-	mods, err = IntersectionByCommit(".tmp/repo", third.String(), second.String())
+	mods, err = NewWorld(t, ".tmp/repo").System.IntersectionByCommit(third.String(), second.String())
 	check(t, err)
 
 	assert.Len(t, mods, 0)
@@ -79,8 +92,7 @@ func TestIntersectionWithoutElements(t *testing.T) {
 
 func TestIntersectionByBranchWithElements(t *testing.T) {
 	clean()
-	repo, err := createTestRepository(".tmp/repo")
-	check(t, err)
+	repo := NewTestRepo(t, ".tmp/repo")
 
 	check(t, repo.InitModule("app-a"))
 	check(t, repo.InitModule("app-b"))
@@ -96,14 +108,14 @@ func TestIntersectionByBranchWithElements(t *testing.T) {
 	check(t, repo.WriteContent("app-b/foo", "hello"))
 	check(t, repo.Commit("third"))
 
-	mods, err := IntersectionByBranch(".tmp/repo", "feature-a", "feature-b")
+	mods, err := NewWorld(t, ".tmp/repo").System.IntersectionByBranch("feature-a", "feature-b")
 	check(t, err)
 
 	assert.Len(t, mods, 1)
 	assert.Equal(t, "app-a", mods[0].Name())
 
 	// This operation should be commutative
-	mods, err = IntersectionByBranch(".tmp/repo", "feature-b", "feature-a")
+	mods, err = NewWorld(t, ".tmp/repo").System.IntersectionByBranch("feature-b", "feature-a")
 	check(t, err)
 
 	assert.Len(t, mods, 1)
@@ -112,8 +124,7 @@ func TestIntersectionByBranchWithElements(t *testing.T) {
 
 func TestIntersectionWithDependencies(t *testing.T) {
 	clean()
-	repo, err := createTestRepository(".tmp/repo")
-	check(t, err)
+	repo := NewTestRepo(t, ".tmp/repo")
 
 	check(t, repo.InitModuleWithOptions("app-a", &Spec{Name: "app-a", Dependencies: []string{"app-c"}}))
 	check(t, repo.InitModule("app-b"))
@@ -129,14 +140,14 @@ func TestIntersectionWithDependencies(t *testing.T) {
 	check(t, repo.WriteContent("app-a/bar", "hello"))
 	check(t, repo.Commit("third"))
 
-	mods, err := IntersectionByBranch(".tmp/repo", "feature-a", "feature-b")
+	mods, err := NewWorld(t, ".tmp/repo").System.IntersectionByBranch("feature-a", "feature-b")
 	check(t, err)
 
 	assert.Len(t, mods, 1)
 	assert.Equal(t, "app-c", mods[0].Name())
 
 	// This operation should be commutative
-	mods, err = IntersectionByBranch(".tmp/repo", "feature-b", "feature-a")
+	mods, err = NewWorld(t, ".tmp/repo").System.IntersectionByBranch("feature-b", "feature-a")
 	check(t, err)
 
 	assert.Len(t, mods, 1)
@@ -145,8 +156,7 @@ func TestIntersectionWithDependencies(t *testing.T) {
 
 func TestIntersctionOfTwoChangesWithSharedDependency(t *testing.T) {
 	clean()
-	repo, err := createTestRepository(".tmp/repo")
-	check(t, err)
+	repo := NewTestRepo(t, ".tmp/repo")
 
 	check(t, repo.InitModuleWithOptions("app-a", &Spec{Name: "app-a", Dependencies: []string{"app-c"}}))
 	check(t, repo.InitModuleWithOptions("app-b", &Spec{Name: "app-b", Dependencies: []string{"app-c"}}))
@@ -162,13 +172,13 @@ func TestIntersctionOfTwoChangesWithSharedDependency(t *testing.T) {
 	check(t, repo.WriteContent("app-b/bar", "hello"))
 	check(t, repo.Commit("third"))
 
-	mods, err := IntersectionByBranch(".tmp/repo", "feature-a", "feature-b")
+	mods, err := NewWorld(t, ".tmp/repo").System.IntersectionByBranch("feature-a", "feature-b")
 	check(t, err)
 
 	assert.Len(t, mods, 0)
 
 	// This operation should be commutative
-	mods, err = IntersectionByBranch(".tmp/repo", "feature-b", "feature-a")
+	mods, err = NewWorld(t, ".tmp/repo").System.IntersectionByBranch("feature-b", "feature-a")
 	check(t, err)
 
 	assert.Len(t, mods, 0)

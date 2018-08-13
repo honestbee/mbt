@@ -1,50 +1,48 @@
+/*
+Copyright 2018 MBT Authors.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+		http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package lib
 
 import (
-	"container/list"
-	"fmt"
-	"strings"
-
-	"github.com/buddyspike/graph"
-	git "github.com/libgit2/git2go"
 	"github.com/mbtproject/mbt/e"
-	"github.com/mbtproject/mbt/trie"
+	"github.com/mbtproject/mbt/graph"
 )
-
-// Module represents a single module in the repository.
-type Module struct {
-	name             string
-	path             string
-	build            map[string]*BuildCmd
-	hash             string
-	version          string
-	properties       map[string]interface{}
-	requires         Modules
-	requiredBy       Modules
-	fileDependencies []string
-}
-
-// Modules is an array of Module.
-type Modules []*Module
 
 // Name returns the name of the module.
 func (a *Module) Name() string {
-	return a.name
+	return a.metadata.spec.Name
 }
 
 // Path returns the relative path to module.
 func (a *Module) Path() string {
-	return a.path
+	return a.metadata.dir
 }
 
 // Build returns the build configuration for the module.
-func (a *Module) Build() map[string]*BuildCmd {
-	return a.build
+func (a *Module) Build() map[string]*Cmd {
+	return a.metadata.spec.Build
+}
+
+// Commands returns a list of user defined commands in the spec.
+func (a *Module) Commands() map[string]*UserCmd {
+	return a.metadata.spec.Commands
 }
 
 // Properties returns the custom properties in the configuration.
 func (a *Module) Properties() map[string]interface{} {
-	return a.properties
+	return a.metadata.spec.Properties
 }
 
 // Requires returns an array of modules required by this module.
@@ -62,9 +60,14 @@ func (a *Module) Version() string {
 	return a.version
 }
 
+// Hash for the content of this module.
+func (a *Module) Hash() string {
+	return a.metadata.hash
+}
+
 // FileDependencies returns the list of file dependencies this module has.
 func (a *Module) FileDependencies() []string {
-	return a.fileDependencies
+	return a.metadata.spec.FileDependencies
 }
 
 type requiredByNodeProvider struct{}
@@ -96,16 +99,10 @@ func (p *requiresNodeProvider) Child(vertex interface{}, index int) (interface{}
 }
 
 func newModule(metadata *moduleMetadata, requires Modules) *Module {
-	spec := metadata.spec
 	mod := &Module{
-		build:            spec.Build,
-		name:             spec.Name,
-		properties:       spec.Properties,
-		hash:             metadata.hash,
-		path:             metadata.dir,
-		requires:         Modules{},
-		requiredBy:       Modules{},
-		fileDependencies: spec.FileDependencies,
+		requires:   Modules{},
+		requiredBy: Modules{},
+		metadata:   metadata,
 	}
 
 	if requires != nil {
@@ -144,14 +141,14 @@ func (l Modules) indexByPath() map[string]*Module {
 func (l Modules) expandRequiredByDependencies() (Modules, error) {
 	// Step 1
 	// Create the new list with all nodes
-	g := new(list.List)
+	g := make([]interface{}, 0, len(l))
 	for _, a := range l {
-		g.PushBack(a)
+		g = append(g, a)
 	}
 
 	// Step 2
 	// Top sort it by requiredBy chain.
-	allItems, err := graph.TopSort(g, &requiredByNodeProvider{})
+	allItems, err := graph.TopSort(&requiredByNodeProvider{}, g...)
 	if err != nil {
 		return nil, e.Wrap(ErrClassInternal, err)
 	}
@@ -159,151 +156,39 @@ func (l Modules) expandRequiredByDependencies() (Modules, error) {
 	// Step 3
 	// Copy resulting array in the reverse order
 	// because we top sorted by requiredBy chain.
-	r := make([]*Module, allItems.Len())
-	i := allItems.Len() - 1
-	for ele := allItems.Front(); ele != nil; ele = ele.Next() {
-		r[i] = ele.Value.(*Module)
+	r := make([]*Module, len(allItems))
+	i := len(allItems) - 1
+	for _, ele := range allItems {
+		r[i] = ele.(*Module)
 		i--
 	}
 
 	return r, nil
 }
 
+// expandRequiresDependencies takes a list of Modules and
+// returns a new list of Modules including the ones in their
+// requires (see below) dependency chain.
+// requires dependency
+// Module dependencies are described in two forms requires and requiredBy.
+// If A needs B, then, A requires B and B is requiredBy A.
 func (l Modules) expandRequiresDependencies() (Modules, error) {
-	g := new(list.List)
+	g := make([]interface{}, 0, len(l))
 	for _, a := range l {
-		g.PushBack(a)
+		g = append(g, a)
 	}
 
-	items, err := graph.TopSort(g, &requiresNodeProvider{})
+	items, err := graph.TopSort(&requiresNodeProvider{}, g...)
 	if err != nil {
 		return nil, e.Wrap(ErrClassInternal, err)
 	}
 
-	r := make([]*Module, items.Len())
+	r := make([]*Module, len(items))
 	i := 0
-	for ele := items.Front(); ele != nil; ele = ele.Next() {
-		r[i] = ele.Value.(*Module)
+	for _, ele := range items {
+		r[i] = ele.(*Module)
 		i++
 	}
 
 	return r, nil
-}
-
-func modulesInCommit(repo *git.Repository, commit *git.Commit) (Modules, error) {
-	metadataSet, err := discoverMetadata(repo, commit)
-	if err != nil {
-		return nil, err
-	}
-
-	vmods, err := metadataSet.toModules()
-	if err != nil {
-		return nil, err
-	}
-
-	return vmods, nil
-}
-
-func modulesInDiff(repo *git.Repository, to, from *git.Commit) (Modules, error) {
-	diff, err := getDiffFromMergeBase(repo, to, from)
-	if err != nil {
-		return nil, err
-	}
-
-	a, err := modulesInCommit(repo, to)
-	if err != nil {
-		return nil, err
-	}
-
-	return reduceToDiff(a, diff)
-}
-
-func modulesInDiffWithDepGraph(repo *git.Repository, to, from *git.Commit, reversed bool) (Modules, error) {
-	mods, err := modulesInDiff(repo, to, from)
-	if err != nil {
-		return nil, err
-	}
-
-	if reversed {
-		mods, err = mods.expandRequiredByDependencies()
-	} else {
-		mods, err = mods.expandRequiresDependencies()
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	return mods, nil
-}
-
-func modulesInDiffWithDependents(repo *git.Repository, to, from *git.Commit) (Modules, error) {
-	return modulesInDiffWithDepGraph(repo, to, from, true)
-}
-
-func modulesInDiffWithDependencies(repo *git.Repository, to, from *git.Commit) (Modules, error) {
-	return modulesInDiffWithDepGraph(repo, to, from, false)
-}
-
-func modulesInDirectoryDiff(repo *git.Repository, dir string) (Modules, error) {
-	modules, err := modulesInDirectory(repo, dir)
-	if err != nil {
-		return nil, err
-	}
-
-	diff, err := getDiffFromIndex(repo)
-	if err != nil {
-		return nil, err
-	}
-
-	m, err := reduceToDiff(modules, diff)
-	if err != nil {
-		return nil, err
-	}
-
-	return m, nil
-}
-
-func modulesInDirectory(repo *git.Repository, dir string) (Modules, error) {
-	metadata, err := discoverMetadataByDir(repo, dir)
-	if err != nil {
-		return nil, err
-	}
-
-	modules, err := metadata.toModules()
-	if err != nil {
-		return nil, err
-	}
-
-	return modules, nil
-}
-
-func reduceToDiff(modules Modules, diff *git.Diff) (Modules, error) {
-	t := trie.NewTrie()
-	filtered := make(Modules, 0)
-	err := diff.ForEach(func(delta git.DiffDelta, num float64) (git.DiffForEachHunkCallback, error) {
-		// Current comparison is case insensitive. This is problematic
-		// for case sensitive file systems.
-		// Perhaps we can read core.ignorecase configuration value
-		// in git and adjust accordingly.
-		t.Add(strings.ToLower(delta.NewFile.Path))
-		return nil, nil
-	}, git.DiffDetailFiles)
-
-	if err != nil {
-		return nil, e.Wrap(ErrClassInternal, err)
-	}
-
-	for _, m := range modules {
-		if t.Find(fmt.Sprintf("%s/", m.Path())).Success {
-			filtered = append(filtered, m)
-		} else {
-			for _, p := range m.FileDependencies() {
-				if t.Find(strings.ToLower(p)).Success {
-					filtered = append(filtered, m)
-				}
-			}
-		}
-	}
-
-	return filtered, nil
 }
