@@ -1,85 +1,93 @@
+/*
+Copyright 2018 MBT Authors.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+		http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package lib
 
-import (
-	git "github.com/libgit2/git2go"
-	"github.com/mbtproject/mbt/e"
-)
-
-// IntersectionByCommit returns the manifest of intersection of modules modified
-// between two commits.
-// If we consider M as the merge base of first and second commits,
-// intersection contains the modules that have been changed
-// between M and first and M and second.
-func IntersectionByCommit(dir, first, second string) (Modules, error) {
-	repo, err := git.OpenRepository(dir)
-	if err != nil {
-		return nil, e.Wrapf(ErrClassUser, err, msgFailedOpenRepo, dir)
-	}
-
-	fc, err := getCommit(repo, first)
+func (s *stdSystem) IntersectionByCommit(first, second string) (Modules, error) {
+	c1, err := s.Repo.GetCommit(first)
 	if err != nil {
 		return nil, err
 	}
 
-	sc, err := getCommit(repo, second)
+	c2, err := s.Repo.GetCommit(second)
 	if err != nil {
 		return nil, err
 	}
 
-	return intersectionCore(repo, fc, sc)
+	return s.intersectionCore(c1, c2)
 }
 
-// IntersectionByBranch returns the manifest of intersection of modules modified
-// between two branches.
-// If we consider M as the merge base of first and second branches,
-// intersection contains the modules that have been changed
-// between M and first and M and second.
-func IntersectionByBranch(dir, first, second string) (Modules, error) {
-	repo, err := git.OpenRepository(dir)
-	if err != nil {
-		return nil, e.Wrapf(ErrClassUser, err, msgFailedOpenRepo, dir)
-	}
-
-	fc, err := getBranchCommit(repo, first)
+func (s *stdSystem) IntersectionByBranch(first, second string) (Modules, error) {
+	fc, err := s.Repo.BranchCommit(first)
 	if err != nil {
 		return nil, err
 	}
 
-	sc, err := getBranchCommit(repo, second)
+	sc, err := s.Repo.BranchCommit(second)
 	if err != nil {
 		return nil, err
 	}
 
-	return intersectionCore(repo, fc, sc)
+	return s.intersectionCore(fc, sc)
 }
 
-func intersectionCore(repo *git.Repository, first, second *git.Commit) (Modules, error) {
-	baseOid, err := repo.MergeBase(first.Id(), second.Id())
-	if err != nil {
-		return nil, e.Wrap(ErrClassInternal, err)
-	}
+func (s *stdSystem) intersectionCore(first, second Commit) (Modules, error) {
+	repo := s.Repo
+	discover := s.Discover
+	reducer := s.Reducer
 
-	base, err := repo.LookupCommit(baseOid)
-	if err != nil {
-		return nil, e.Wrap(ErrClassInternal, err)
-	}
-
-	firstSet, err := modulesInDiff(repo, first, base)
+	base, err := repo.MergeBase(first, second)
 	if err != nil {
 		return nil, err
 	}
 
-	firstSetWithDeps, err := modulesInDiffWithDependencies(repo, first, base)
+	modules, err := discover.ModulesInCommit(first)
 	if err != nil {
 		return nil, err
 	}
 
-	secondSet, err := modulesInDiff(repo, second, base)
+	diff, err := repo.Diff(first, base)
 	if err != nil {
 		return nil, err
 	}
 
-	secondSetWithDeps, err := modulesInDiffWithDependencies(repo, second, base)
+	firstSet, err := reducer.Reduce(modules, diff)
+	if err != nil {
+		return nil, err
+	}
+
+	firstSetWithDeps, err := firstSet.expandRequiresDependencies()
+	if err != nil {
+		return nil, err
+	}
+
+	modules, err = discover.ModulesInCommit(second)
+	if err != nil {
+		return nil, err
+	}
+
+	diff, err = repo.Diff(second, base)
+	if err != nil {
+		return nil, err
+	}
+	secondSet, err := reducer.Reduce(modules, diff)
+	if err != nil {
+		return nil, err
+	}
+
+	secondSetWithDeps, err := secondSet.expandRequiresDependencies()
 	if err != nil {
 		return nil, err
 	}

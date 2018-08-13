@@ -9,7 +9,7 @@ build_libgit2:
 	./scripts/build_libgit2.sh
 
 .PHONY: build
-build: clean 
+build: clean
 	./scripts/build.sh
 
 .PHONY: clean
@@ -27,6 +27,9 @@ test: build_libgit2
 	go test -covermode=count ./lib
 	go test -covermode=count ./cmd
 	go test -covermode=count ./trie
+	go test -covermode=count ./intercept
+	go test -covermode=count ./graph
+	go test -covermode=count ./utils
 	go test -covermode=count .
 
 .PHONY: showcover
